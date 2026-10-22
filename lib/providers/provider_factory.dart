@@ -1,4 +1,3 @@
-import '../models/ai_provider_config.dart';
 import 'ai_provider.dart';
 import 'openai_provider.dart';
 import 'anthropic_provider.dart';
@@ -19,5 +18,11 @@ class AIProviderFactory {
       case AIProviderKind.custom:
         return CustomProvider(config);
     }
+  }
+
+  /// Convenience method to query available models for a given configuration.
+  static Future<List<String>> fetchModels(AIProviderConfig config) {
+    final provider = build(config);
+    return provider.loadModels();
   }
 }

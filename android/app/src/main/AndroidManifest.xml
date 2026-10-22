@@ -22,8 +22,9 @@
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
 
     <application
-        android:label="Vehicle Damage Analyzer"
-        android:icon="@mipmap/ic_launcher">
+        android:label="SV - Vehicle Fault Detection"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round">
         <activity
             android:name=".MainActivity"
             android:exported="true"

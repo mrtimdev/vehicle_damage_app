@@ -2,10 +2,10 @@ import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:uuid/uuid.dart';
 import '../models/damage_report.dart';
+import '../utils/media_utils.dart';
 import 'ai_provider.dart';
 import 'openai_provider.dart';
 import 'json_extractor.dart';
-import 'dart:convert';
 
 /// For users pointing at their own self-hosted vision model / gateway.
 /// Defaults to the OpenAI-compatible chat/completions shape (used by many
@@ -16,6 +16,7 @@ class CustomProvider extends AIProvider {
   const CustomProvider(super.config);
 
   /// Loads model ids from the OpenAI-compatible `/models` endpoint.
+  @override
   Future<List<String>> loadModels() async {
     final dio = Dio(BaseOptions(
       baseUrl: config.baseUrl,
@@ -31,31 +32,43 @@ class CustomProvider extends AIProvider {
 
     final response = await dio.get('/models');
     final data = response.data;
-    if (data is! Map<String, dynamic> || data['data'] is! List) {
-      throw const FormatException(
-          'The custom provider returned an invalid /models response.');
+    if (data is Map<String, dynamic>) {
+      if (data['data'] is List) {
+        return (data['data'] as List)
+            .whereType<Map>()
+            .map((model) => model['id']?.toString() ?? '')
+            .where((id) => id.isNotEmpty)
+            .toList();
+      }
+      if (data['models'] is List) {
+        return (data['models'] as List)
+            .whereType<Map>()
+            .map((model) => (model['name'] ?? model['id'])?.toString() ?? '')
+            .where((id) => id.isNotEmpty)
+            .toList();
+      }
     }
-
-    return (data['data'] as List)
-        .whereType<Map>()
-        .map((model) => model['id']?.toString() ?? '')
-        .where((id) => id.isNotEmpty)
-        .toList();
+    throw const FormatException(
+        'The custom provider returned an unexpected /models response format.');
   }
 
   @override
-  Future<DamageReport> analyzeImages(List<File> images,
-      {String? extraContext}) async {
-    // Custom endpoints are assumed OpenAI-compatible by default. If a
-    // user's self-hosted server uses a different contract, they can fork
-    // this class — the interface (AIProvider) stays the same everywhere
-    // else in the app.
+  Future<DamageReport> analyzeImages(
+    List<File> images, {
+    File? audioFile,
+    String? extraContext,
+    CancelToken? cancelToken,
+  }) async {
     final delegate = OpenAIProvider(config);
     try {
-      return await delegate.analyzeImages(images, extraContext: extraContext);
+      return await delegate.analyzeImages(
+        images,
+        audioFile: audioFile,
+        extraContext: extraContext,
+        cancelToken: cancelToken,
+      );
     } catch (e) {
-      // Fallback: try a minimal generic POST and surface the raw text so
-      // the user can see what came back even if parsing failed.
+      if (e is DioException && CancelToken.isCancel(e)) rethrow;
       final dio = Dio(BaseOptions(
         baseUrl: config.baseUrl,
         headers: {
@@ -64,12 +77,16 @@ class CustomProvider extends AIProvider {
           ...config.extraHeaders,
         },
       ));
-      final bytes = await images.first.readAsBytes();
-      final response = await dio.post('/analyze', data: {
-        'model': config.model,
-        'image_base64': base64Encode(bytes),
-        'prompt': kDamageAnalysisPrompt,
-      });
+      final encoded = await MediaUtils.encodeImagesToBase64([images.first]);
+      final response = await dio.post(
+        '/analyze',
+        cancelToken: cancelToken,
+        data: {
+          'model': config.model,
+          'image_base64': encoded.first,
+          'prompt': kDamageAnalysisPrompt,
+        },
+      );
 
       final raw = response.data.toString();
       Map<String, dynamic> json;
@@ -86,10 +103,32 @@ class CustomProvider extends AIProvider {
           .map((e) => DamageItem.fromJson(e as Map<String, dynamic>))
           .toList();
 
+      VehicleIdentity? parsedIdentity;
+      if (json['vehicle_identity'] is Map) {
+        parsedIdentity = VehicleIdentity.fromJson(
+          Map<String, dynamic>.from(json['vehicle_identity'] as Map),
+        );
+      }
+
+      VehicleHealthAssessment? parsedHealth;
+      if (json['health_assessment'] is Map) {
+        parsedHealth = VehicleHealthAssessment.fromJson(
+          Map<String, dynamic>.from(json['health_assessment'] as Map),
+        );
+      }
+
+      AcousticAnalysisResult? parsedAcoustic;
+      if (json['acoustic_analysis'] is Map) {
+        parsedAcoustic = AcousticAnalysisResult.fromJson(
+          Map<String, dynamic>.from(json['acoustic_analysis'] as Map),
+        );
+      }
+
       return DamageReport(
         id: const Uuid().v4(),
         createdAt: DateTime.now(),
         sourceMediaPath: images.first.path,
+        mediaPaths: images.map((f) => f.path).toList(),
         providerLabel: label,
         modelUsed: config.model,
         items: items,
@@ -98,8 +137,11 @@ class CustomProvider extends AIProvider {
             : items.map((e) => e.confidence).reduce((a, b) => a + b) /
                 items.length,
         rawModelResponse: raw,
-        summary: json['summary'],
-        summaryKhmer: json['summary_km'],
+        summary: json['summary']?.toString(),
+        summaryKhmer: json['summary_km']?.toString(),
+        vehicleIdentity: parsedIdentity,
+        healthAssessment: parsedHealth,
+        acousticAnalysis: parsedAcoustic,
       );
     }
   }
